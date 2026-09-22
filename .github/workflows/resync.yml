@@ -71,7 +71,7 @@ jobs:
       # attribution unambiguous if the pipeline is later stopped before tests.
       - name: Standalone tests
         if: steps.target.outputs.skip != 'true'
-        run: bun test tests-omp/
+        run: bun test tests-omp/ patches/
 
       - name: Open resync PR
         if: steps.target.outputs.skip != 'true'
@@ -83,7 +83,7 @@ jobs:
           commit-message: "chore: resync to pi-blackhole ${{ steps.target.outputs.version }}"
           title: "chore: resync to pi-blackhole ${{ steps.target.outputs.version }}"
           body: |
-            Automated resync: the fork was regenerated from the npm tarball of `pi-blackhole@${{ steps.target.outputs.version }}` via `bun patches/apply.ts --version ${{ steps.target.outputs.version }}`, and `bun test tests-omp/` passed on the result.
+            Automated resync: the fork was regenerated from the npm tarball of `pi-blackhole@${{ steps.target.outputs.version }}` via `bun patches/apply.ts --version ${{ steps.target.outputs.version }}`, and `bun test tests-omp/ patches/` passed on the result. Any patch that upstream has since fixed reports itself as retired in the run log; a patch whose target was reshaped fails the run instead of guessing.
 
             - Fork base before this run: `${{ steps.target.outputs.base }}`
             - New target: `${{ steps.target.outputs.version }}`

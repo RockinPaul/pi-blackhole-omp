@@ -68,7 +68,7 @@ function parseArgs(argv: string[]): Options {
  * still cleans the staging dir — process.exit() skips finally blocks, which is
  * how a failed run once left a full staging tree behind to be committed.
  */
-class PatchError extends Error {}
+export class PatchError extends Error {}
 
 function fail(message: string): never {
   throw new PatchError(message);
@@ -141,45 +141,57 @@ function replaceOnce(file: string, needle: string, replacement: string, label: s
 
 // ── patches ─────────────────────────────────────────────────────────────────
 
-/**
- * P1 — vendor `stripTerminalSequences`.
- *
- * Upstream imports it from `@earendil-works/pi-tui`. omp rewrites that specifier
- * onto its own bundled pi-tui, which does not export the symbol, so the
- * extension fails to load (and fails omp's install-time validation gate).
- * The vendored copy is byte-identical to pi-mono's, so pi behavior is unchanged.
- */
-function patchVendoredStripper(root: string): void {
-  const target = join(root, "src/compat/strip-terminal-sequences.ts");
-  const source = join(VENDOR_FILES, "strip-terminal-sequences.ts");
-  if (!existsSync(source)) fail(`vendor file missing: ${rel(source)}`);
-  mkdirSync(join(root, "src/compat"), { recursive: true });
-  cpSync(source, target);
-  step("patched vendored stripTerminalSequences module");
-}
+/** Whether a compat patch still had work to do on this upstream release. */
+export type PatchOutcome = "applied" | "retired";
 
-/** P2 — point cosmetic-output.ts at the vendored module. */
-function patchCosmeticOutput(root: string): void {
+/**
+ * P1+P2 — vendor `stripTerminalSequences` and point cosmetic-output.ts at it.
+ *
+ * Upstream imports the symbol from `@earendil-works/pi-tui`. omp rewrites that
+ * specifier onto its own bundled pi-tui, which does not export it, so the
+ * extension fails omp's install-time validation gate. The vendored copy is
+ * byte-identical to pi-mono's, so pi behavior is unchanged.
+ *
+ * Self-retiring: if upstream stops using the symbol, this reports `retired` and
+ * the vendor file is not written. Once omp ships the export
+ * (can1357/oh-my-pi#12795) the patch is redundant but still harmless.
+ */
+export function patchTerminalSequences(root: string): PatchOutcome {
   const file = join(root, "src/hooks/cosmetic-output.ts");
   const source = readText(file);
   const match = source.match(/import \{([^}]*)\} from "@earendil-works\/pi-tui";/);
-  if (!match) fail(`P2: pi-tui import not found in ${rel(file)} — upstream reshaped it`);
-
-  const names = (match[1] ?? "")
+  const names = (match?.[1] ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter((name) => name.length > 0);
-  if (!names.includes("stripTerminalSequences")) {
-    fail(`P2: stripTerminalSequences no longer imported in ${rel(file)} — patch is obsolete`);
+
+  if (match === null || !names.includes("stripTerminalSequences")) {
+    // No longer imported from pi-tui. Tell "upstream dropped the usage"
+    // (retire) apart from "upstream reshaped the import" (must not guess).
+    if (source.includes("stripTerminalSequences(")) {
+      fail(
+        `P2: ${rel(file)} still calls stripTerminalSequences but no longer imports it from ` +
+          "@earendil-works/pi-tui — import reshaped, update the patch",
+      );
+    }
+    step("retired P1+P2: upstream no longer uses stripTerminalSequences");
+    return "retired";
   }
 
   const kept = names.filter((name) => name !== "stripTerminalSequences");
   if (kept.length === 0) fail("P2: pi-tui import would be empty — inspect upstream");
+
+  const vendorSource = join(VENDOR_FILES, "strip-terminal-sequences.ts");
+  if (!existsSync(vendorSource)) fail(`vendor file missing: ${rel(vendorSource)}`);
+  mkdirSync(join(root, "src/compat"), { recursive: true });
+  cpSync(vendorSource, join(root, "src/compat/strip-terminal-sequences.ts"));
+
   const replacement =
     `import { ${kept.join(", ")} } from "@earendil-works/pi-tui";\n` +
     `import { stripTerminalSequences } from "../compat/strip-terminal-sequences.js";`;
   writeText(file, source.replace(match[0], replacement));
-  step("patched src/hooks/cosmetic-output.ts import");
+  step("patched P1+P2 vendored stripTerminalSequences + import");
+  return "applied";
 }
 
 /**
@@ -189,10 +201,14 @@ function patchCosmeticOutput(root: string): void {
  * detached. pi's ExtensionAPI is closure-based so that works; omp's is a class
  * whose methods read `this.extension`, so the detached call throws
  * `undefined is not an object (evaluating 'this.extension')`. `bind` is a no-op
- * on pi.
+ * on pi. Self-retiring once k0valik/pi-blackhole#124 merges.
  */
-function patchCompactFailed(root: string): void {
+export function patchReceiverBind(root: string): PatchOutcome {
   const file = join(root, "src/hooks/compact-failed.ts");
+  if (readText(file).includes("pi.on.bind(pi)")) {
+    step("retired P3: upstream already binds the receiver");
+    return "retired";
+  }
   replaceOnce(
     file,
     "const onAny = pi.on as unknown as (",
@@ -202,6 +218,7 @@ function patchCompactFailed(root: string): void {
       "  const onAny = pi.on.bind(pi) as unknown as (",
     "P3 compact-failed receiver bind",
   );
+  return "applied";
 }
 
 /** P4 — manifest: git-installable, dual-host, source-only. */
@@ -308,9 +325,13 @@ function publishTree(staging: string): void {
 // ── verification ────────────────────────────────────────────────────────────
 
 function runBunTests(): void {
-  const proc = Bun.spawnSync(["bun", "test", "tests-omp/"], { cwd: REPO_ROOT, stderr: "inherit", stdout: "inherit" });
-  if (proc.exitCode !== 0) fail("tests-omp failed");
-  step("tests-omp pass");
+  const proc = Bun.spawnSync(["bun", "test", "tests-omp/", "patches/"], {
+    cwd: REPO_ROOT,
+    stderr: "inherit",
+    stdout: "inherit",
+  });
+  if (proc.exitCode !== 0) fail("tests failed");
+  step("tests pass (tests-omp + patches)");
 }
 
 /**
@@ -390,11 +411,24 @@ async function main(options: Options): Promise<void> {
     const tarball = await downloadTarball(version, workDir);
     extract(tarball, staging);
 
-    patchVendoredStripper(staging);
-    patchCosmeticOutput(staging);
-    patchCompactFailed(staging);
+    const outcomes: Record<string, PatchOutcome> = {
+      "P1+P2 stripTerminalSequences": patchTerminalSequences(staging),
+      "P3 receiver bind": patchReceiverBind(staging),
+    };
     patchManifest(staging, version);
     patchLayout(staging);
+
+    const names = Object.keys(outcomes);
+    const retired = names.filter((name) => outcomes[name] === "retired");
+    if (retired.length === names.length) {
+      console.log(
+        `\n⚠ no compat patch was needed for ${PKG}@${version} — this fork is a passthrough.\n` +
+          `  Stock \`omp plugin install npm:${PKG}\` should work on an omp release that\n` +
+          "  carries the host fix; consider archiving this repo.\n",
+      );
+    } else if (retired.length > 0) {
+      console.log(`⚠ retired (fixed upstream): ${retired.join(", ")}`);
+    }
 
     publishTree(staging);
     runBunTests();
@@ -408,15 +442,17 @@ async function main(options: Options): Promise<void> {
   }
 }
 
-try {
-  await main(parseArgs(process.argv.slice(2)));
-} catch (error) {
-  const detail =
-    error instanceof PatchError
-      ? error.message
-      : error instanceof Error
-        ? (error.stack ?? error.message)
-        : String(error);
-  console.error(`\n✖ ${detail}\n`);
-  process.exit(1);
+if (import.meta.main) {
+  try {
+    await main(parseArgs(process.argv.slice(2)));
+  } catch (error) {
+    const detail =
+      error instanceof PatchError
+        ? error.message
+        : error instanceof Error
+          ? (error.stack ?? error.message)
+          : String(error);
+    console.error(`\n✖ ${detail}\n`);
+    process.exit(1);
+  }
 }

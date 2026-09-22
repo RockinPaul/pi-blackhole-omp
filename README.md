@@ -72,13 +72,32 @@ Tune it in `/blackhole settings` — the `observerModel`, `reflectorModel` and `
 
 ## Tool-name collision: `recall`
 
-Blackhole registers a tool named `recall`. omp has a built-in `recall` too, but it is only registered when `memory.backend` is `hindsight` or `mnemopi` (default: `off`). Check before installing:
+Blackhole registers a tool named `recall`. omp has a built-in `recall` too, but only registers it when `memory.backend` is `hindsight` or `mnemopi` (default `off`). Check before installing:
 
 ```sh
 omp config get memory.backend
 ```
 
-If that prints anything other than `off`, the two `recall` tools collide — pick one backend.
+If that prints `off` (or `local`), the built-in is not registered at all and there is nothing to collide with — that is the state this fork was verified in.
+
+If it prints `hindsight` or `mnemopi`, **the extension tool wins**: omp lets an extension-registered tool shadow a built-in of the same name, and even passes `ctx.invokeTool` so a shadowing tool can delegate to the native one (omp `docs/extensions.md`, "when your registered tool shadows a built-in"). Blackhole's `recall` does not delegate, so long-term-memory recall would be silently replaced by session-history recall. There is no config key to rename it — your options are `memory.backend: off`, or not installing this fork.
+
+Commands behave the **opposite** way: a command whose name conflicts with a built-in is skipped with diagnostics, so the built-in wins. Blackhole's four commands (`blackhole`, `blackhole-memory`, `blackhole-recall`, `blackhole-export`) clash with nothing in omp.
+
+## When the upstream fixes merge
+
+Both compat patches are **self-retiring** — `patches/apply.ts` decides per release whether each still has work to do, and reports `applied` or `retired`:
+
+| Upstream change | Effect on the resync |
+| --- | --- |
+| [k0valik/pi-blackhole#124](https://github.com/k0valik/pi-blackhole/pull/124) merges (bind the receiver) | P3 reports `retired`; the regenerated tree carries upstream's own fix |
+| Upstream stops using `stripTerminalSequences` entirely | P1+P2 report `retired`; no vendor file is written |
+| [can1357/oh-my-pi#12795](https://github.com/can1357/oh-my-pi/pull/12795) merges **and ships in an omp release** | Stock `omp plugin install npm:pi-blackhole` starts working on that omp version |
+| Upstream reshapes a patched region | The pipeline **fails loudly** (non-zero exit, tree untouched) rather than guessing |
+
+When every compat patch retires, the pipeline prints a passthrough notice: the fork is then just upstream plus packaging, and the right move is to install stock pi-blackhole and archive this repo.
+
+Mind the asymmetry in the meantime. A merged **pi-blackhole** PR helps as soon as the plugin republishes to npm. A merged **omp** PR only helps once you update the binary you actually run (`omp update`, or `brew upgrade omp`) — the symbol has to exist in *your* omp, not just in its main branch. Check `omp --version` before concluding the fork is obsolete; until an omp release carries the export, the vendored copy is still load-bearing.
 
 ## Development
 
@@ -93,7 +112,7 @@ bun patches/apply.ts --version <upstreamVersion>   # e.g. 0.5.8
 **Test** (standalone, no omp, no tokens):
 
 ```sh
-bun test tests-omp/
+bun test tests-omp/ patches/
 ```
 
 **Load check** (token-free, ~1.3 s, no model call) — proves the plugin imports cleanly on a local omp:
