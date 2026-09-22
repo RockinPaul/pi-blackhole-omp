@@ -1,0 +1,9 @@
+# Bun/Node install noise
+node_modules/
+# tarballs fetched by patches/apply.ts and npm leftovers
+*.tgz
+# staging dir used while regenerating the tree
+patches/.tmp/
+# macOS
+.DS_Store
+# NOTE: bun.lock is deliberately NOT ignored — lockfiles are tracked.
